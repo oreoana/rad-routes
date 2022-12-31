@@ -2,14 +2,21 @@
 
 import sys
 import os
-from schema import Schema, SchemaError, Use, Optional, And
+from schema import Schema, SchemaError, Optional, And
 import yaml
 import fit2gpx
 import folium
 from folium import plugins
-import pandas as pd
 
 class RadRouter():
+    def generate_popup_html(self, coordinates):
+        html = " ".join(["<h2>", coordinates['title'].iat[0], "</h2><br><p>", coordinates['description'].iat[0], "</p>"])
+
+        if coordinates['image'].iat[0] is not None:
+            html = " ".join([html, "<br><img style = \"width: auto; height: 200px\" src = ",  coordinates['image'].iat[0], ">"])
+
+        return html
+
     def process_activities(self, path_to_config):
         # Consumes a path to a config file and generates a map.
         activities = self.validate_config(path_to_config)
@@ -25,15 +32,16 @@ class RadRouter():
         for segment in segments:
             segment_path = os.path.join(directory, segment['file_name'])
             _, df_coordinates = conv.fit_to_dataframes(segment_path)
-            df_coordinates['file_name'] = segment['file_name']
+            df_coordinates['file_name'] = segment.get('file_name')
+            df_coordinates['title'] = segment.get('title', 'Title')
+            df_coordinates['description'] = segment.get('description', 'Description goes here!')
+            df_coordinates['image'] = segment.get('image')
 
             all_coordinates_list.append(df_coordinates)
 
-        # add check to see if speed exists in dataframe
-        self.add_antpath(all_coordinates_list, map)
-        self.fit_map(all_coordinates_list, map)
+        self.add_geojson_line(all_coordinates_list, map)
 
-        folium.LayerControl().add_to(map)
+        # folium.LayerControl().add_to(map)
         map.save('map.html')
         print('Map saved.')
 
@@ -41,9 +49,9 @@ class RadRouter():
         try:
             with open(path_to_config, 'r') as config_file:
                 activities = yaml.safe_load(config_file)
-            print(f"Successfully opened config file: {path_to_config}")
+            print(f'Successfully opened config file: {path_to_config}')
         except IOError:
-            print(f"Could not find file: {path_to_config}")
+            print(f'Could not find file: {path_to_config}')
             sys.exit(1)
 
         # need to add check that individual files exist
@@ -53,7 +61,8 @@ class RadRouter():
                 'segments': [{
                     'file_name': str,
                     Optional('title'): str,
-                    Optional('description'): str
+                    Optional('description'): str,
+                    Optional('image'): str
                 }]
             }
         })
@@ -67,27 +76,48 @@ class RadRouter():
 
         return activities
 
-    def add_antpath(self, coordinates_list, map):
-        # AntPath delay range is 1 to 800. We normalize the max speed from input files against the max of 800.
-        speed = pd.concat(coordinates_list)['speed']
-        normalization = 800.0 / speed.max()
+    def add_geojson_line(self, coordinates_list, map):
+        # step 1: convert antpaths to geojson
+        # step 2: oreo adds popups to geojson
+        # step 3: oreo adds markers
+        # step 4: animate / play button
 
-        feature_group = folium.FeatureGroup(name = 'Ant Path', show = True)
-        map.add_child(feature_group)
+        segment_features = []
 
         for coordinates in coordinates_list:
-            plugins.AntPath(
-                locations=coordinates[['latitude', 'longitude']],
-                delay=coordinates['speed'].mean() * normalization,
-            ).add_to(feature_group)
+            feature = {
+                'type': 'Feature',
+                'geometry': {
+                    'type': 'LineString',
+                    'coordinates': coordinates[['longitude', 'latitude']].values.tolist(),
+                },
+                'properties': {
+                    'weight': 5,
+                    'html': self.generate_popup_html(coordinates),
+                },
+            }
 
-    def fit_map(self, coordinates_list, map):
-        coordinates_df = pd.concat(coordinates_list)[['latitude', 'longitude']]
+            segment_features.append(feature)
 
-        southwest_bound = coordinates_df.min().tolist()
-        northeast_bound = coordinates_df.max().tolist()
+        geojson_features = {
+            'type': 'FeatureCollection',
+            'features': segment_features
+        }
 
-        map.fit_bounds([southwest_bound, northeast_bound])
+        segment_layer = folium.GeoJson(
+            geojson_features,
+            zoom_on_click=True,
+            highlight_function=lambda x: {
+                'color': 'green',
+                'weight': 10,
+            },
+            popup=folium.GeoJsonPopup(
+                fields=['html'],
+                labels=False,
+            )
+        ).add_to(map)
+
+        map.fit_bounds(segment_layer.get_bounds())
 
 if __name__ == "__main__":
     # if len(sys.argv) != 2:
